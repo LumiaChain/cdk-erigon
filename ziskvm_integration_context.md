@@ -1,6 +1,35 @@
 # ZiskVM Integration Context Dump for Erigon FEP
 
 ## Date: November 26, 2025
+## Status: EXECUTION PLAN COMPLETE
+
+## Full Execution Plan
+
+A comprehensive execution plan has been generated at:
+**`/workspace/ZISKVM_FEP_INTEGRATION_PLAN.md`**
+
+## Architecture Decision: Dual-Proof System
+
+```
+CDK-Erigon (Execution + Consensus)
+    ├─ Witness Generation (stateless proving)
+    ├─ Transaction Batching (prover-optimized)
+    └─ Two-Tier Proof System:
+        ├─ Pessimistic Proofs via SP1 (AggLayer/Bridge) [UNCHANGED]
+        │   └─ Bridge state + withdrawal validation
+        └─ ZiskVM Execution Proofs (Full verification) [NEW]
+            ├─ Block execution proofs
+            ├─ Per-transaction proofs (optional)
+            └─ State transition verification
+```
+
+## Key Architectural Principles
+
+1. **DO NOT REPLACE** SP1-based Pessimistic Proofs (bridge security)
+2. **USE ZiskVM** specifically for Full Execution Proofs (FEPs)
+3. **Maintain backward compatibility** with legacy executor
+4. **Configurable** - toggle between legacy/ZiskVM via flags
+5. **Async processing** - maintain non-blocking verification
 
 ## Current Architecture Analysis
 
@@ -44,6 +73,7 @@
    - `ExecutorEnabled` - toggle executor usage
    - `ExecutorMaxConcurrentRequests`
    - `ExecutorRequestTimeout`
+   - `PessimisticForkNumber` - PP fork handling (fork 12+)
 
 ### ZiskVM Architecture
 
@@ -63,16 +93,59 @@
 - `syscall_bn254_curve_add/dbl` - BN254 pairing
 - `syscall_arith256_mod` - 256-bit modular arithmetic
 
-## Integration Points Identified
+## Implementation Phases (from full plan)
 
-1. **Verifier Interface** - Replace `LegacyExecutorVerifier` with ZiskVM-based verifier
-2. **Witness Format** - Transform SMT witness to ZiskVM input format
-3. **EVM Program** - Need zkEVM implementation as ZiskVM program
-4. **Proof Output** - Adapt verification of ZiskVM proofs
-5. **Configuration** - New config options for ZiskVM
+| Phase | Duration | Focus |
+|-------|----------|-------|
+| Phase 1 | 2-3 weeks | Foundation & Infrastructure |
+| Phase 2 | 6-8 weeks | ZiskVM zkEVM Program (Rust) |
+| Phase 3 | 3-4 weeks | CDK-Erigon Integration (Go) |
+| Phase 4 | 2-3 weeks | Verification & AggLayer |
+| Phase 5 | 3-4 weeks | Optimization & Production |
 
-## Key Files to Modify/Create
-- `zk/ziskvm_verifier/` - New verifier package
-- `eth/ethconfig/config_zkevm.go` - Add ZiskVM config
-- `zk/stages/stage_sequence_execute.go` - Update verifier calls
-- `turbo/cli/flags_zkevm.go` - Add CLI flags
+**Total: 16-24 weeks (4-6 months)**
+
+## Key Files to Modify
+
+| File | Change |
+|------|--------|
+| `eth/ethconfig/config_zkevm.go` | Add ZiskVM config fields |
+| `cmd/utils/flags.go` | Add ZiskVM CLI flags |
+| `turbo/cli/flags_zkevm.go` | Apply ZiskVM flags |
+| `zk/stages/stage_sequence_execute.go` | Use verifier multiplexer |
+| `zk/stages/stage_sequence_execute_utils.go` | Add multiplexer support |
+
+## New Packages to Create
+
+```
+zk/
+├── ziskvm_verifier/           # NEW
+│   ├── verifier.go
+│   ├── encoder.go
+│   ├── decoder.go
+│   ├── service.go
+│   ├── proof_store.go
+│   ├── agglayer.go
+│   └── metrics.go
+└── verifier_multiplexer/      # NEW
+    ├── multiplexer.go
+    └── strategy.go
+```
+
+## Critical Integration Point
+
+**`zk/stages/stage_sequence_execute.go` Line 808:**
+```go
+cfg.legacyVerifier.StartAsyncVerification(...)
+```
+→ Replace with verifier multiplexer call
+
+## Detailed Plan Reference
+
+See `/workspace/ZISKVM_FEP_INTEGRATION_PLAN.md` for:
+- Complete code examples
+- Interface definitions
+- Configuration schemas
+- Testing strategies
+- Risk mitigations
+- Timeline breakdowns
