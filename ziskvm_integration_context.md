@@ -146,6 +146,28 @@ See `/workspace/ZISKVM_FEP_INTEGRATION_PLAN.md` for:
 - Complete code examples
 - Interface definitions
 - Configuration schemas
-- Testing strategies
+- Testing strategies (TDD-compliant)
 - Risk mitigations
 - Timeline breakdowns
+- CDK-Erigon code standards (ABOUTME, error handling, logging)
+
+## CDK-Erigon Specific Considerations
+
+### Code Standards Required
+- **ABOUTME comments**: Every new file must start with 2 ABOUTME comments
+- **TDD**: Write failing tests first, then minimal code
+- **Test naming**: `Test<Function>_<Scenario>_<ExpectedBehavior>`
+- **Coverage**: Minimum 70% line coverage
+- **No temporal adjectives**: Avoid "new", "old", "improved" in comments
+
+### Performance Notes
+- **SMT/Poseidon**: CPU-intensive, faster on x86 than Apple Silicon
+- **Witness Generation**: Can block RPC, use caching
+- **Memory**: Monitor during proof generation
+- **GPU**: Strongly recommended for ZiskVM proving
+
+### Build Requirements
+- **Go version**: 1.24+ (enforced by Makefile)
+- **Dependencies**: `make build-libs` for platform-specific deps
+- **Test command**: `make test` (10m timeout), `make test-integration` (240m)
+- **Lint command**: `make lint`

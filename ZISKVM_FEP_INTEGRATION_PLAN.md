@@ -32,17 +32,46 @@ CDK-Erigon (Execution + Consensus)
 7. [Phase 4: Verification & AggLayer Integration](#7-phase-4-verification--agglayer-integration)
 8. [Phase 5: Optimization & Production Readiness](#8-phase-5-optimization--production-readiness)
 9. [File Modification Matrix](#9-file-modification-matrix)
-10. [New Components to Create](#10-new-components-to-create)
-11. [Testing Strategy](#11-testing-strategy)
-12. [Risks and Mitigations](#12-risks-and-mitigations)
-13. [Timeline Estimates](#13-timeline-estimates)
-14. [Appendices](#14-appendices)
+10. [CDK-Erigon Code Standards & Patterns](#10-cdk-erigon-code-standards--patterns)
+11. [New Components to Create](#11-new-components-to-create)
+12. [Testing Strategy](#12-testing-strategy)
+13. [Risks and Mitigations](#13-risks-and-mitigations)
+14. [Timeline Estimates](#14-timeline-estimates)
+15. [Appendices](#15-appendices)
 
 ---
 
 ## 1. Current Architecture Analysis
 
-### 1.1 Existing Proof Generation Flow
+### 1.1 CDK-Erigon Overview
+
+CDK-Erigon is a fork of Erigon optimized for syncing with the Polygon Hermez zkEVM network. It serves as both an **RPC node** and a **sequencer** for zero-knowledge rollup chains.
+
+**Key Characteristics:**
+- **Language**: Go 1.24+ (required)
+- **Primary Use Cases**: zkEVM RPC node (data stream sync), zkEVM sequencer (tx execution + batch creation)
+- **Core Technologies**: Sparse Merkle Trees (SMT), Poseidon hashing, data streaming
+- **Dual Mode**: RPC Mode (default) vs Sequencer Mode (`CDK_ERIGON_SEQUENCER=1`)
+
+### 1.2 Staged Sync Architecture
+
+CDK-Erigon uses a staged synchronization model:
+
+```
+Stage 1: Headers sync
+Stage 2: Block bodies sync  
+Stage 3: Execution (with zkEVM state transitions)
+Stage 4: Inter-hashes (SMT updates)
+Stage 5: Verification and finalization
+```
+
+For zkEVM, custom stages are in `zk/stages/`:
+- `stage_sequence_execute.go` - Main sequencer execution
+- `stage_sequence_execute_transactions.go` - Transaction processing
+- `stage_interhashes.go` - SMT updates
+- `stage_batches.go` - Batch management
+
+### 1.3 Existing Proof Generation Flow
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -68,9 +97,17 @@ CDK-Erigon (Execution + Consensus)
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 1.2 Key Components
+### 1.4 State Commitment Strategies
 
-#### 1.2.1 LegacyExecutorVerifier (`zk/legacy_executor_verifier/legacy_executor_verifier.go`)
+Two state root computation methods in CDK-Erigon:
+- **SMT (Sparse Merkle Tree)**: Default, zkEVM-native using Poseidon hashing
+- **PMT (Patricia Merkle Trie)**: Ethereum-compatible, optional
+
+Configuration via `zkevm.initial-commitment` flag.
+
+### 1.5 Key Components
+
+#### 1.5.1 LegacyExecutorVerifier (`zk/legacy_executor_verifier/legacy_executor_verifier.go`)
 
 **Purpose**: Manages asynchronous batch verification via promises.
 
@@ -1776,9 +1813,156 @@ zkevm:
 
 ---
 
-## 10. New Components to Create
+## 10. CDK-Erigon Code Standards & Patterns
 
-### 10.1 ZiskVM zkEVM Program (Rust)
+### 10.1 Required File Documentation
+
+**Every new file MUST start with two ABOUTME comments:**
+
+```go
+// ABOUTME: Handles ZiskVM-based batch verification for Full Execution Proofs
+// ABOUTME: Integrates with verifier multiplexer for FEP generation using ZiskVM
+
+package ziskvm_verifier
+```
+
+### 10.2 Error Handling Patterns
+
+```go
+// GOOD: Wrap errors with context
+if err := db.Put(key, value); err != nil {
+    return fmt.Errorf("failed to store ZiskVM proof for batch %d: %w", batchNum, err)
+}
+
+// GOOD: Check specific error types
+if errors.Is(err, ErrProofNotFound) {
+    return nil  // Expected case
+}
+
+// BAD: Swallow errors
+_ = db.Put(key, value)  // Never ignore write errors
+```
+
+### 10.3 Context Management
+
+```go
+// Always accept context as first parameter
+func (v *ZiskVMVerifier) VerifyBatch(ctx context.Context, req *VerificationRequest) error {
+    // Check cancellation
+    select {
+    case <-ctx.Done():
+        return ctx.Err()
+    default:
+    }
+    
+    // Pass context to sub-operations
+    return v.generateAndVerifyProof(ctx, req)
+}
+```
+
+### 10.4 Database Transaction Patterns
+
+```go
+// Pattern: Read-Write transaction
+tx, err := db.BeginRw(ctx)
+if err != nil {
+    return err
+}
+defer tx.Rollback()  // Safe to call even after Commit
+
+if err := storeProof(tx, proof); err != nil {
+    return err  // Rollback happens via defer
+}
+
+return tx.Commit()
+
+// Pattern: Read-only transaction
+tx, err := db.BeginRo(ctx)
+if err != nil {
+    return err
+}
+defer tx.Rollback()
+
+return loadProof(tx, batchNumber)
+```
+
+### 10.5 Logging Standards
+
+```go
+import "github.com/erigontech/erigon-lib/log/v3"
+
+// Structured logging with context
+log.Info("ZiskVM proof generated", 
+    "batch", batchNum, 
+    "blocks", len(blocks), 
+    "proving_time_ms", provingTime.Milliseconds())
+
+log.Warn("ZiskVM service slow response", 
+    "duration", dur, 
+    "threshold", threshold,
+    "service_url", serviceUrl)
+
+log.Error("ZiskVM verification failed", 
+    "batch", batchNum, 
+    "expected_root", expectedRoot,
+    "computed_root", computedRoot,
+    "err", err)
+```
+
+### 10.6 Test Naming Convention
+
+```go
+// Format: Test<Function>_<Scenario>_<ExpectedBehavior>
+func TestZiskVMVerifier_WithInvalidWitness_ShouldReturnError(t *testing.T)
+func TestEncoderEncodeInput_WhenDataStreamEmpty_ShouldIncludeHeader(t *testing.T)
+func TestMultiplexer_WhenZiskVMUnavailable_ShouldFallbackToLegacy(t *testing.T)
+```
+
+### 10.7 Comment Guidelines
+
+```go
+// GOOD: Explain what and why
+// EncodeZiskVMInput transforms CDK-Erigon witness format to ZiskVM binary input.
+// Uses JSON encoding for compatibility with existing ZiskVM tooling.
+
+// BAD: Temporal adjectives (avoid "new", "old", "improved")
+// This is the new ZiskVM encoder that replaces the legacy one.  // WRONG
+
+// BAD: Implementation details in comments
+// Uses base64 encoding because ZiskVM requires it.  // WRONG (implementation detail)
+```
+
+### 10.8 Concurrency Patterns
+
+```go
+// Pattern: Worker pool with errgroup
+func (v *ZiskVMVerifier) VerifyBatches(ctx context.Context, batches []*VerificationRequest) error {
+    g, ctx := errgroup.WithContext(ctx)
+    
+    for _, batch := range batches {
+        batch := batch  // Capture loop variable
+        g.Go(func() error {
+            return v.VerifyBatch(ctx, batch)
+        })
+    }
+    
+    return g.Wait()
+}
+
+// Pattern: Select with timeout
+func (v *ZiskVMVerifier) ProveWithTimeout(ctx context.Context, req *VerificationRequest) (*ZiskProof, error) {
+    ctx, cancel := context.WithTimeout(ctx, v.cfg.ZiskVMRequestTimeout)
+    defer cancel()
+    
+    return v.service.Prove(ctx, req)
+}
+```
+
+---
+
+## 11. New Components to Create
+
+### 11.1 ZiskVM zkEVM Program (Rust)
 
 ```
 ziskvm-zkevm/
@@ -1826,27 +2010,83 @@ ziskvm-prover-service/
 
 ---
 
-## 11. Testing Strategy
+## 12. Testing Strategy
 
-### 11.1 Unit Tests
+### 12.1 TDD Approach (Required)
 
-| Component | Test Focus |
-|-----------|------------|
-| Encoder | Input serialization correctness |
-| Decoder | Output parsing accuracy |
-| Service | Connection handling, error recovery |
-| Multiplexer | Routing logic, fallback behavior |
-| ProofStore | Persistence, retrieval |
+Follow CDK-Erigon's strict TDD principles:
 
-### 11.2 Integration Tests
+1. **Write failing test first** that expresses intent
+2. **Confirm test fails** for the correct reason
+3. **Write minimal code** to pass
+4. **Refactor** while keeping tests green
+
+```go
+// GOOD: Tests intent
+func TestZiskVMVerifier_WithInvalidStateRoot_ShouldReturnMismatchError(t *testing.T) {
+    verifier := NewTestZiskVMVerifier(t)
+    req := &VerificationRequest{
+        ExpectedStateRoot: common.HexToHash("0x1234..."),
+    }
+    
+    result, err := verifier.VerifyBatch(context.Background(), req)
+    
+    require.NoError(t, err)
+    assert.False(t, result.Valid)
+    assert.ErrorIs(t, result.Error, ErrStateRootMismatch)
+}
+
+// BAD: Tests implementation detail
+func TestZiskVMVerifier_CallsServiceVerify(t *testing.T) {
+    // Just mirrors code, doesn't test behavior
+}
+```
+
+### 12.2 Unit Tests
+
+| Component | Test Focus | File |
+|-----------|------------|------|
+| Encoder | Input serialization correctness | `encoder_test.go` |
+| Decoder | Output parsing accuracy | `decoder_test.go` |
+| Service | Connection handling, error recovery | `service_test.go` |
+| Multiplexer | Routing logic, fallback behavior | `multiplexer_test.go` |
+| ProofStore | Persistence, retrieval | `proof_store_test.go` |
+
+**Run unit tests:**
+```bash
+go test ./zk/ziskvm_verifier/... -v -count=1
+go test ./zk/verifier_multiplexer/... -v -count=1
+```
+
+### 12.3 Integration Tests
+
+Tag integration tests with build constraint:
+
+```go
+//go:build integration
+
+package ziskvm_verifier_test
+
+func TestZiskVMVerifier_FullBatchVerification_Integration(t *testing.T) {
+    // Test requires running ZiskVM service
+    // ...
+}
+```
+
+**Run integration tests:**
+```bash
+make test-integration  # 240m timeout
+```
+
+#### Integration Test Scenarios
 
 1. **Witness Compatibility Test**
-   - Generate witness from Erigon
+   - Generate witness from Erigon using `zk/witness/witness.go`
    - Parse in ZiskVM program
    - Verify SMT root computation matches
 
 2. **Full Batch Verification Test**
-   - Execute batch in Erigon
+   - Execute batch in Erigon sequencer
    - Generate ZiskVM proof
    - Verify proof validity
    - Compare state roots
@@ -1854,34 +2094,106 @@ ziskvm-prover-service/
 3. **Failover Test**
    - Simulate ZiskVM service failure
    - Verify fallback to legacy executor
-   - Check no data loss
+   - Check no data loss or state corruption
 
-### 11.3 Performance Tests
+4. **Unwind Compatibility Test**
+   - Verify ZiskVM verifier handles unwinds correctly
+   - Test batch cancellation mid-verification
 
-1. **Latency Benchmarks**
-   - Measure proving time per batch size
-   - Compare with legacy executor
+### 12.4 zkEVM-Specific Tests
 
-2. **Throughput Tests**
-   - Concurrent proof generation
-   - GPU vs CPU performance
+Create test vectors in `zk/ziskvm_verifier/testdata/`:
 
-3. **Resource Usage**
-   - Memory consumption
-   - CPU/GPU utilization
+```
+zk/ziskvm_verifier/
+├── testdata/
+│   ├── witness_batch_100.json
+│   ├── datastream_batch_100.bin
+│   ├── expected_proof_batch_100.json
+│   └── mainnet_vectors/
+│       ├── batch_1000000.json
+│       └── batch_1000001.json
+└── ziskvm_test.go
+```
 
-### 11.4 Test Vectors
+**Run zkEVM-specific tests:**
+```bash
+make test-unwind  # Standard unwind tests with ZiskVM
+```
+
+### 12.5 Performance Benchmarks
+
+```go
+func BenchmarkZiskVMEncoder_EncodeBatch(b *testing.B) {
+    witness := loadTestWitness(b)
+    datastream := loadTestDataStream(b)
+    req := &VerificationRequest{/* ... */}
+    
+    b.ResetTimer()
+    for i := 0; i < b.N; i++ {
+        _, _ = EncodeZiskVMInput(witness, datastream, req)
+    }
+}
+
+func BenchmarkZiskVMVerifier_VerifyBatch(b *testing.B) {
+    // Requires running ZiskVM service
+    verifier := setupBenchmarkVerifier(b)
+    req := loadBenchmarkRequest(b)
+    
+    b.ResetTimer()
+    for i := 0; i < b.N; i++ {
+        _, _ = verifier.VerifyBatch(context.Background(), req)
+    }
+}
+```
+
+**Run benchmarks:**
+```bash
+go test ./zk/ziskvm_verifier/... -bench=. -benchmem
+```
+
+### 12.6 Coverage Requirements
+
+- **Minimum**: 70% line coverage
+- **Mutation Testing**: Use to validate test quality
+
+```bash
+# Check coverage
+go test ./zk/ziskvm_verifier/... -coverprofile=coverage.out
+go tool cover -html=coverage.out
+
+# Target high coverage for critical paths
+# - Encoder/Decoder: 90%+
+# - Multiplexer: 85%+
+# - Service client: 80%+
+```
+
+### 12.7 Hive Tests (Optional)
+
+For full Ethereum client compatibility:
+
+```bash
+export GITHUB_TOKEN=<your_token>
+make test-hive  # Standard Hive suites
+```
+
+### 12.8 Test Vectors
 
 Create test vectors from:
-- Mainnet historical batches
-- Testnet batches
-- Synthetic edge cases (large transactions, complex contracts)
+- **Mainnet historical batches**: Extract from production data
+- **Cardona Testnet batches**: Recent test network data
+- **Synthetic edge cases**: 
+  - Large transactions (max gas)
+  - Complex contract interactions
+  - Precompile-heavy batches (BN254, Keccak)
+  - Empty batches
+  - Single-transaction batches
 
 ---
 
-## 12. Risks and Mitigations
+## 13. Risks and Mitigations
 
-### 12.1 Technical Risks
+### 13.1 Technical Risks
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
@@ -1889,28 +2201,53 @@ Create test vectors from:
 | ZiskVM precompile performance | Medium | Benchmark early, optimize syscalls |
 | State root mismatch | High | Comprehensive test vectors, fuzzing |
 | Memory constraints in ZiskVM | Medium | Witness size limits, chunked processing |
+| SMT/Poseidon hash mismatch | High | Use identical SMT implementation in ZiskVM |
+| Apple Silicon slowdown | Medium | Document limitation, prioritize x86 for proving |
 
-### 12.2 Operational Risks
+### 13.2 Operational Risks
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
 | ZiskVM service unavailability | High | Automatic fallback to legacy executor |
 | Proof generation latency | Medium | GPU acceleration, parallel proving |
 | Configuration complexity | Low | Sensible defaults, documentation |
+| L1 rate limiting during recovery | Medium | Use dedicated L1 RPC with high rate limits |
+| Database corruption during unwind | High | Proper transaction handling, backups |
 
-### 12.3 Security Risks
+### 13.3 Security Risks
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
 | Soundness vulnerability in ZiskVM | Critical | Use audited ZiskVM version, verify proofs |
 | Witness manipulation | High | Cryptographic witness commitment |
 | Service impersonation | Medium | mTLS, authentication |
+| Private key exposure | Critical | Use `$PRV_KEY` env var, never hardcode |
+
+### 13.4 Performance Considerations
+
+**Known CDK-Erigon Bottlenecks to Consider:**
+
+1. **SMT Operations**: Poseidon hashing is CPU-intensive
+   - Faster on x86 (Golden Poseidon vectorized)
+   - Slower on Apple Silicon (iden3 fallback)
+   
+2. **Witness Generation**: CPU-bound, can block RPC
+   - Consider `zkevm.witness-full: false` for partial witnesses
+   - Use witness caching (`zkevm.witness-cache-enabled: true`)
+
+3. **Initial Sync**: SMT rebuild can take hours
+   - Enable `zkevm.smt-regenerate-in-memory: true` if sufficient RAM
+
+**ZiskVM-Specific Performance Notes:**
+- GPU proving significantly faster than CPU
+- MPI distributed proving for large batches
+- Monitor memory usage during proof generation
 
 ---
 
-## 13. Timeline Estimates
+## 14. Timeline Estimates
 
-### 13.1 Phase Breakdown
+### 14.1 Phase Breakdown
 
 | Phase | Duration | Dependencies |
 |-------|----------|--------------|
@@ -1920,13 +2257,13 @@ Create test vectors from:
 | Phase 4: Verification & AggLayer | 2-3 weeks | Phase 3 |
 | Phase 5: Optimization | 3-4 weeks | Phase 4 |
 
-### 13.2 Total Estimated Timeline
+### 14.2 Total Estimated Timeline
 
 **Minimum**: 16 weeks (4 months)
 **Realistic**: 20-24 weeks (5-6 months)
 **Conservative**: 28 weeks (7 months)
 
-### 13.3 Parallelization Opportunities
+### 14.3 Parallelization Opportunities
 
 - Phase 2 (Rust) can proceed in parallel with Phase 1 (Go) after interfaces defined
 - Testing can begin during Phase 3
@@ -1934,9 +2271,9 @@ Create test vectors from:
 
 ---
 
-## 14. Appendices
+## 15. Appendices
 
-### 14.1 Glossary
+### 15.1 Glossary
 
 | Term | Definition |
 |------|------------|
@@ -1948,7 +2285,7 @@ Create test vectors from:
 | DataStream | Encoded batch data (transactions, headers, etc.) |
 | Witness | State data needed for proof generation |
 
-### 14.2 References
+### 15.2 References
 
 - [ZiskVM Documentation](https://0xpolygonhermez.github.io/zisk)
 - [CDK-Erigon Architecture](https://docs.agglayer.dev/cdk/cdk-erigon/architecture/)
@@ -1956,7 +2293,7 @@ Create test vectors from:
 - [AggLayer](https://www.agglayer.dev/)
 - [Plonky3](https://github.com/Plonky3/Plonky3)
 
-### 14.3 Current Codebase Key Files
+### 15.3 Current Codebase Key Files
 
 ```
 zk/
