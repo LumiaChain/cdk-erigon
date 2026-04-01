@@ -125,3 +125,7 @@ zk/debug_tools/rpc-cache/rpc-cache
 
 /dynamic*.json
 /dynamic*.yaml
+
+AGENTS.md
+INTENT_LAYER_SETUP.md
+WARP.md
